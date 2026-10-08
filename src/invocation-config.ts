@@ -123,19 +123,14 @@ export function resolveAgentInvocationConfig(
   const requested = agentConfig?.isolation ?? params.isolation;
   const isolation = requested === "worktree" && opts?.worktreeAllowed !== false ? "worktree" : undefined;
 
-  const overriddenThinking = agentConfig?.thinking != null && params.thinking != null
-    && agentConfig.thinking !== params.thinking
-    ? params.thinking as ThinkingLevel
-    : undefined;
-  const overriddenModel = agentConfig?.model != null && params.model != null
-    && agentConfig.model !== params.model
-    ? params.model
-    : undefined;
+  // Fork change: frontmatter model/thinking are defaults; an explicit caller value wins.
+  const overriddenThinking = undefined as ThinkingLevel | undefined;
+  const overriddenModel = undefined as string | undefined;
 
   return {
-    modelInput: agentConfig?.model ?? params.model,
-    modelFromParams: agentConfig?.model == null && params.model != null,
-    thinking: (agentConfig?.thinking ?? params.thinking) as ThinkingLevel | undefined,
+    modelInput: params.model ?? agentConfig?.model,
+    modelFromParams: params.model != null,
+    thinking: (params.thinking ?? agentConfig?.thinking) as ThinkingLevel | undefined,
     maxTurns: agentConfig?.maxTurns ?? params.max_turns,
     inheritContext: agentConfig?.inheritContext ?? params.inherit_context ?? false,
     runInBackground: agentConfig?.runInBackground ?? params.run_in_background ?? opts?.defaultRunInBackground ?? false,

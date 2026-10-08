@@ -19,7 +19,7 @@ function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 }
 
 describe("resolveAgentInvocationConfig", () => {
-  it("prefers agent config over tool-call params for locked fields", () => {
+  it("lets tool-call model/thinking override agent config; other fields stay locked", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({
         model: "provider/config-model",
@@ -41,9 +41,9 @@ describe("resolveAgentInvocationConfig", () => {
       },
     );
 
-    expect(resolved.modelInput).toBe("provider/config-model");
-    expect(resolved.modelFromParams).toBe(false);
-    expect(resolved.thinking).toBe("high");
+    expect(resolved.modelInput).toBe("provider/param-model");
+    expect(resolved.modelFromParams).toBe(true);
+    expect(resolved.thinking).toBe("minimal");
     expect(resolved.maxTurns).toBe(42);
     expect(resolved.inheritContext).toBe(false);
     expect(resolved.runInBackground).toBe(false);
@@ -150,13 +150,13 @@ describe("resolveJoinMode", () => {
 });
 
 describe("resolveAgentInvocationConfig — overridden params (#182)", () => {
-  it("records the caller's values when the agent file outranks them", () => {
+  it("records nothing when the caller overrides the agent file", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({ model: "provider/config-model", thinking: "low" }),
       { model: "provider/param-model", thinking: "max" },
     );
 
-    expect(resolved.overridden).toEqual({ thinking: "max", model: "provider/param-model" });
+    expect(resolved.overridden).toBeUndefined();
   });
 
   it("records nothing when the caller got what they asked for", () => {
@@ -182,12 +182,4 @@ describe("resolveAgentInvocationConfig — overridden params (#182)", () => {
     ).overridden).toBeUndefined();
   });
 
-  it("records each field independently", () => {
-    const resolved = resolveAgentInvocationConfig(
-      makeConfig({ thinking: "low" }),
-      { model: "provider/param-model", thinking: "max" },
-    );
-
-    expect(resolved.overridden).toEqual({ thinking: "max", model: undefined });
-  });
 });
