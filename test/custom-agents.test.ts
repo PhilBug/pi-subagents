@@ -759,6 +759,20 @@ No bash or write.`);
     expect(agent.disallowedTools).toEqual(["bash", "write"]);
   });
 
+  it("parses mcp_servers: omitted/all = every server, none/false = no server, csv = listed", () => {
+    const cases: Array<[string, string[] | undefined]> = [
+      ["", undefined],
+      ["mcp_servers: all\n", undefined],
+      ["mcp_servers: none\n", []],
+      ["mcp_servers: false\n", []],
+      ["mcp_servers: aws-knowledge, clickup\n", ["aws-knowledge", "clickup"]],
+    ];
+    for (const [i, [line, expected]] of cases.entries()) {
+      writeAgent(`mcp${i}`, `---\ndescription: d\n${line}---\n\nBody.`);
+      expect(loadCustomAgents(tmpDir).get(`mcp${i}`)!.mcpServers).toEqual(expected);
+    }
+  });
+
   it("disallowed_tools defaults to undefined when omitted", () => {
     writeAgent("unrestricted", `---
 description: Unrestricted
@@ -1085,6 +1099,13 @@ Good body.`);
       // `tools: none` parses to [] on load, so ejecting an agent with zero
       // built-ins must not write `tools: all` — that hands it the whole toolbox.
       expect(roundTrip({ builtinToolNames: [] }).builtinToolNames).toEqual([]);
+    });
+
+    it("round-trips mcp_servers without widening a server named true to every server", () => {
+      expect(roundTrip({ mcpServers: ["true"] }).mcpServers).toEqual(["true"]);
+      expect(roundTrip({ mcpServers: ["aws", "null"] }).mcpServers).toEqual(["aws", "null"]);
+      expect(roundTrip({ mcpServers: [] }).mcpServers).toEqual([]);
+      expect(roundTrip({}).mcpServers).toBeUndefined();
     });
 
     it("preserves the scalar and list fields it writes", () => {
