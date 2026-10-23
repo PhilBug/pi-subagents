@@ -209,6 +209,9 @@ export function parseExtSelectors(entries: string[]): {
   return { extNames, narrowing };
 }
 
+/** pi's MCP resource tools; each reaches any server named in its arguments. */
+const MCP_RESOURCE_TOOL_NAMES = ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
+
 /**
  * Keep a subagent's tool scope correct as extensions register tools over time.
  *
@@ -262,6 +265,20 @@ export function installExtensionToolScope(
   // (core/mcp-servers.ts `mcpNamespace`). The namespace, unlike the tool name, is
   // never shortened and cannot be confused with another server's.
   const mcpNamespaces = ctx.mcpServers && new Set(ctx.mcpServers.map((s) => `mcp__${s.replace(/-/g, "_")}`));
+  // Tools `mcp_servers:` denies wherever else they were admitted (a plain `tools:` entry
+  // included). pi's resource tools take the server as an argument, so they cannot be
+  // scoped by namespace and are denied whenever the server list is restricted.
+  const mcpDenied = (): string[] => {
+    if (!mcpNamespaces) return [];
+    const denied = [...MCP_RESOURCE_TOOL_NAMES];
+    for (const extension of loader.getExtensions().extensions) {
+      for (const [name, tool] of extension.tools) {
+        const ns = tool.definition?.namespace?.name;
+        if (ns?.startsWith("mcp__") && !mcpNamespaces.has(ns)) denied.push(name);
+      }
+    }
+    return denied;
+  };
 
   // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
   // selector is present, extension tools become an explicit allowlist — a loaded
@@ -276,15 +293,14 @@ export function installExtensionToolScope(
       // First alias that carries a narrowing set — a user won't narrow one
       // extension under two different names, so first-match is correct.
       const narrowed = canons.map((c) => narrowing.get(c)).find(Boolean);
-      for (const [name, tool] of extension.tools) {
+      for (const name of extension.tools.keys()) {
         if (narrowed && !narrowed.has(name)) continue;
-        const ns = tool.definition?.namespace?.name;
-        if (mcpNamespaces && ns?.startsWith("mcp__") && !mcpNamespaces.has(ns)) continue;
         if (disallowedSet?.has(name)) continue;
         keep.add(name);
       }
     }
     for (const name of EXCLUDED_TOOL_NAMES) keep.delete(name);
+    for (const name of mcpDenied()) keep.delete(name);
     // Injected tools are legitimately active for this agent — re-admit them so
     // the renarrow keeps them in the active set and beforeToolCall doesn't
     // block them. Already vetted against `disallowed_tools` by the caller,

@@ -1101,6 +1101,13 @@ Good body.`);
       expect(roundTrip({ builtinToolNames: [] }).builtinToolNames).toEqual([]);
     });
 
+    it("round-trips mcp_servers without widening a server named true to every server", () => {
+      expect(roundTrip({ mcpServers: ["true"] }).mcpServers).toEqual(["true"]);
+      expect(roundTrip({ mcpServers: ["aws", "null"] }).mcpServers).toEqual(["aws", "null"]);
+      expect(roundTrip({ mcpServers: [] }).mcpServers).toEqual([]);
+      expect(roundTrip({}).mcpServers).toBeUndefined();
+    });
+
     it("preserves the scalar and list fields it writes", () => {
       const loaded = roundTrip({
         displayName: "RT",

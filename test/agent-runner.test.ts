@@ -1717,7 +1717,8 @@ describe("agent-runner async extension tool registration", () => {
     vi.mocked(getAgentConfig).mockReturnValueOnce(
       makeAgentConfig({ extensions: true, mcpServers: ["aws-docs"] }),
     );
-    vi.mocked(getToolNamesForType).mockReturnValueOnce(["read"]);
+    // A plain `tools:` entry must not readmit a denied server's tool.
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(["read", "mcp__aws_docs__admin__drop"]);
     const tool = (ns?: string) => ({ definition: ns ? { namespace: { name: ns } } : {} });
     loaderExtensionsRef.current = {
       extensions: [
@@ -1730,6 +1731,8 @@ describe("agent-runner async extension tool registration", () => {
             // pi shortens long names with a hash; the namespace still identifies the server.
             ["mcp__aws_docs_1a2b3c4d", tool("mcp__aws_docs")],
             ["other_tool", tool()],
+            // Reaches any server through its arguments, so it cannot be scoped.
+            ["read_mcp_resource", tool()],
           ]),
         },
       ],
@@ -1746,6 +1749,7 @@ describe("agent-runner async extension tool registration", () => {
     await expect(gate("mcp__aws_docs_1a2b3c4d")).resolves.toBeUndefined();
     await expect(gate("other_tool")).resolves.toBeUndefined();
     await expect(gate("mcp__aws_docs__admin__drop")).resolves.toMatchObject({ block: true });
+    await expect(gate("read_mcp_resource")).resolves.toMatchObject({ block: true });
   });
 
   it("beforeToolCall blocks an out-of-scope tool and delegates otherwise", async () => {
