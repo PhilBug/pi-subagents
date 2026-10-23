@@ -2435,6 +2435,23 @@ describe("agent-runner ext: tool selectors", () => {
     expect(tools).not.toContain("baz");
   });
 
+  it("ext:foo/prefix* narrows foo to tools with that prefix", async () => {
+    setupExtAgent({ extensions: true, builtinToolNames: ["read"], extSelectors: ["ext:foo/mcp__aws__*"] });
+    withExtensions({ "/ext/foo.ts": ["mcp__aws__search", "mcp__aws__read", "mcp__clickup__search"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const tools = lastToolsPassed();
+    expect(tools).toContain("mcp__aws__search");
+    expect(tools).toContain("mcp__aws__read");
+    expect(tools).not.toContain("mcp__clickup__search");
+    await expect(
+      session.agent.beforeToolCall?.({ toolCall: { name: "mcp__clickup__search" } }),
+    ).resolves.toMatchObject({ block: true });
+  });
+
   it("ext:foo is orphaned when extensions: false — no extension loads, warning fires", async () => {
     // `extensions:` is the sole loading authority. `ext:` selectors can only narrow
     // within the loaded set; they cannot pull an excluded extension back in.

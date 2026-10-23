@@ -179,6 +179,7 @@ export function parseExtensionsSpec(
  * A name lands in `narrowing` only when a `/tool` form is seen, so a bare
  * `ext:foo` alongside `ext:foo/bar` leaves narrowing in effect (narrowing wins).
  * The split is on the first `/`; extension canonical names never contain `/`.
+ * A tool half ending in `*` is a prefix (see {@link toolSelectorMatches}).
  */
 export function parseExtSelectors(entries: string[]): {
   extNames: Set<string>;
@@ -208,6 +209,20 @@ export function parseExtSelectors(entries: string[]): {
   }
   return { extNames, narrowing };
 }
+
+/**
+ * Whether an `ext:foo/<selector>` tool half selects `name`. A trailing `*` matches
+ * by prefix, so `mcp__aws_knowledge_mcp_server__*` selects one MCP server's tools
+ * (pi names them `mcp__<server>__<tool>`). Any other `*` is literal.
+ */
+export function toolSelectorMatches(selector: string, name: string): boolean {
+  return selector.endsWith("*") ? name.startsWith(selector.slice(0, -1)) : selector === name;
+}
+
+const selectsTool = (selectors: Iterable<string>, name: string): boolean => {
+  for (const s of selectors) if (toolSelectorMatches(s, name)) return true;
+  return false;
+};
 
 /**
  * Keep a subagent's tool scope correct as extensions register tools over time.
@@ -271,7 +286,7 @@ export function installExtensionToolScope(
       // extension under two different names, so first-match is correct.
       const narrowed = canons.map((c) => narrowing.get(c)).find(Boolean);
       for (const name of extension.tools.keys()) {
-        if (narrowed && !narrowed.has(name)) continue;
+        if (narrowed && !selectsTool(narrowed, name)) continue;
         if (disallowedSet?.has(name)) continue;
         keep.add(name);
       }
@@ -288,7 +303,9 @@ export function installExtensionToolScope(
   // Names this agent selects explicitly: its built-ins, injected tools, and
   // `ext:foo/bar` narrowings. pi activates a named tool even when it is
   // `defaultActive: false`, as `--tools` does.
-  const named = new Set([...toolNames, ...readmitToolNames, ...[...narrowing.values()].flatMap((s) => [...s])]);
+  const named = new Set([...toolNames, ...readmitToolNames]);
+  const narrowedSelectors = [...narrowing.values()].flatMap((s) => [...s]);
+  const isNamed = (name: string) => named.has(name) || selectsTool(narrowedSelectors, name);
 
   // Activate what pi itself would: only tools declared to the model (`direct`/
   // `model-only` exposure), and of those only named ones or ones not opted out
@@ -305,7 +322,7 @@ export function installExtensionToolScope(
         if (!allowed.has(name)) return false;
         if (active.has(name)) return true;
         if (exposure !== "direct" && exposure !== "model-only") return false;
-        return named.has(name) || session.getToolDefinition(name)?.defaultActive !== false;
+        return isNamed(name) || session.getToolDefinition(name)?.defaultActive !== false;
       })
       .map((t) => t.name);
     // setActiveToolsByName unconditionally rebuilds the system prompt, so skip
