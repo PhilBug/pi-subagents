@@ -211,16 +211,22 @@ export function parseExtSelectors(entries: string[]): {
 }
 
 /**
- * Whether an `ext:foo/<selector>` tool half selects `name`. A trailing `*` matches
- * by prefix, so `mcp__aws_knowledge_mcp_server__*` selects one MCP server's tools
- * (pi names them `mcp__<server>__<tool>`). Any other `*` is literal.
+ * Whether an `ext:foo/<selector>` tool half selects a tool. A trailing `*` matches
+ * by prefix. For a tool in a namespace (pi puts each MCP server's tools in
+ * `mcp__<server>`), the prefix must start with the whole `<namespace>__`, so
+ * `mcp__aws__*` selects server `aws` but not server `aws__admin`, and still
+ * selects `aws` tools whose names pi shortened with a hash. Any other `*` is literal.
  */
-export function toolSelectorMatches(selector: string, name: string): boolean {
-  return selector.endsWith("*") ? name.startsWith(selector.slice(0, -1)) : selector === name;
+export function toolSelectorMatches(selector: string, name: string, namespace?: string): boolean {
+  if (!selector.endsWith("*")) return selector === name;
+  const prefix = selector.slice(0, -1);
+  if (!namespace) return name.startsWith(prefix);
+  const own = `${namespace}__`;
+  return prefix === own || (prefix.startsWith(own) && name.startsWith(prefix));
 }
 
-const selectsTool = (selectors: Iterable<string>, name: string): boolean => {
-  for (const s of selectors) if (toolSelectorMatches(s, name)) return true;
+const selectsTool = (selectors: Iterable<string>, name: string, namespace?: string): boolean => {
+  for (const s of selectors) if (toolSelectorMatches(s, name, namespace)) return true;
   return false;
 };
 
@@ -272,12 +278,14 @@ export function installExtensionToolScope(
 ): void {
   const { loader, toolNames, disallowedSet, extNames, narrowing, readmitToolNames, nestedCallGate } = ctx;
 
-  // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
-  // selector is present, extension tools become an explicit allowlist — a loaded
-  // extension not named by a selector contributes nothing (its handlers still ran),
-  // and `ext:foo/bar` narrows `foo` to just `bar`.
-  const inScope = (): Set<string> => {
+  // The names allowed right now, and among them the ones an `ext:foo/bar` selector
+  // names, matched against the owning extension's selectors only. Mirrors the `ext:`
+  // opt-in flip: when any `ext:` selector is present, extension tools become an
+  // explicit allowlist — a loaded extension not named by a selector contributes
+  // nothing (its handlers still ran), and `ext:foo/bar` narrows `foo` to just `bar`.
+  const scopeNow = (): { keep: Set<string>; selected: Set<string> } => {
     const keep = new Set(toolNames.filter((t) => !disallowedSet?.has(t)));
+    const selected = new Set<string>();
     const optInActive = extNames.size > 0;
     for (const extension of loader.getExtensions().extensions) {
       const canons = extensionCanonicalNames(extension.path);
@@ -285,10 +293,11 @@ export function installExtensionToolScope(
       // First alias that carries a narrowing set — a user won't narrow one
       // extension under two different names, so first-match is correct.
       const narrowed = canons.map((c) => narrowing.get(c)).find(Boolean);
-      for (const name of extension.tools.keys()) {
-        if (narrowed && !selectsTool(narrowed, name)) continue;
+      for (const [name, tool] of extension.tools) {
+        if (narrowed && !selectsTool(narrowed, name, tool.definition?.namespace?.name)) continue;
         if (disallowedSet?.has(name)) continue;
         keep.add(name);
+        if (narrowed) selected.add(name);
       }
     }
     for (const name of EXCLUDED_TOOL_NAMES) keep.delete(name);
@@ -297,15 +306,14 @@ export function installExtensionToolScope(
     // block them. Already vetted against `disallowed_tools` by the caller,
     // which is the only place that knows which kind may be taken back.
     for (const name of readmitToolNames) keep.add(name);
-    return keep;
+    return { keep, selected };
   };
+  const inScope = (): Set<string> => scopeNow().keep;
 
   // Names this agent selects explicitly: its built-ins, injected tools, and
   // `ext:foo/bar` narrowings. pi activates a named tool even when it is
   // `defaultActive: false`, as `--tools` does.
   const named = new Set([...toolNames, ...readmitToolNames]);
-  const narrowedSelectors = [...narrowing.values()].flatMap((s) => [...s]);
-  const isNamed = (name: string) => named.has(name) || selectsTool(narrowedSelectors, name);
 
   // Activate what pi itself would: only tools declared to the model (`direct`/
   // `model-only` exposure), and of those only named ones or ones not opted out
@@ -313,7 +321,7 @@ export function installExtensionToolScope(
   // default) stay undeclared until their extension or `tool_search` activates
   // them — so an already-active tool is kept, or turn_end would undo that.
   const renarrow = () => {
-    const allowed = inScope();
+    const { keep: allowed, selected } = scopeNow();
     const current = session.getActiveToolNames();
     const active = new Set(current);
     const next = session
@@ -322,7 +330,7 @@ export function installExtensionToolScope(
         if (!allowed.has(name)) return false;
         if (active.has(name)) return true;
         if (exposure !== "direct" && exposure !== "model-only") return false;
-        return isNamed(name) || session.getToolDefinition(name)?.defaultActive !== false;
+        return named.has(name) || selected.has(name) || session.getToolDefinition(name)?.defaultActive !== false;
       })
       .map((t) => t.name);
     // setActiveToolsByName unconditionally rebuilds the system prompt, so skip

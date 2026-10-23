@@ -142,6 +142,7 @@ import {
   setDefaultMaxTurns,
   setGraceTurns,
   setRememberAgents,
+  toolSelectorMatches,
 } from "../src/agent-runner.js";
 import { compileJsonSchema } from "../src/workflow/json-schema.js";
 
@@ -2329,6 +2330,31 @@ describe("agent-runner unknown built-in tools", () => {
 });
 
 // ─── ext: tool selectors in `tools:` (opt-in flip) ──────────────────────
+describe("toolSelectorMatches", () => {
+  it("matches exact names without *", () => {
+    expect(toolSelectorMatches("bar", "bar")).toBe(true);
+    expect(toolSelectorMatches("bar", "barx")).toBe(false);
+  });
+  it("a trailing * is a name prefix for tools without a namespace", () => {
+    expect(toolSelectorMatches("bar_*", "bar_x")).toBe(true);
+    expect(toolSelectorMatches("bar_*", "baz_x")).toBe(false);
+    expect(toolSelectorMatches("b*r", "bxr")).toBe(false);
+  });
+  it("a namespaced tool needs the whole namespace, so server aws does not admit aws__admin", () => {
+    expect(toolSelectorMatches("mcp__aws__*", "mcp__aws__search", "mcp__aws")).toBe(true);
+    expect(toolSelectorMatches("mcp__aws__*", "mcp__aws__admin__drop", "mcp__aws__admin")).toBe(false);
+    expect(toolSelectorMatches("mcp__aws__admin__*", "mcp__aws__admin__drop", "mcp__aws__admin")).toBe(true);
+  });
+  it("a namespace selector keeps tools whose names pi shortened with a hash", () => {
+    expect(toolSelectorMatches("mcp__long_server__*", "mcp__long_servXa1b2c3", "mcp__long_server")).toBe(true);
+  });
+  it("a narrower prefix inside the namespace still filters by name", () => {
+    expect(toolSelectorMatches("mcp__aws__search_*", "mcp__aws__search_docs", "mcp__aws")).toBe(true);
+    expect(toolSelectorMatches("mcp__aws__search_*", "mcp__aws__read", "mcp__aws")).toBe(false);
+    expect(toolSelectorMatches("mcp__a*", "mcp__aws__read", "mcp__aws")).toBe(false);
+  });
+});
+
 describe("parseExtSelectors", () => {
   it("bare ext:foo → name only, no narrowing", () => {
     const { extNames, narrowing } = parseExtSelectors(["ext:foo"]);
