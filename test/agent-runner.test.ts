@@ -142,7 +142,6 @@ import {
   setDefaultMaxTurns,
   setGraceTurns,
   setRememberAgents,
-  toolSelectorMatches,
 } from "../src/agent-runner.js";
 import { compileJsonSchema } from "../src/workflow/json-schema.js";
 
@@ -1713,6 +1712,42 @@ describe("agent-runner async extension tool registration", () => {
     expect(session.getActiveToolNames()).not.toContain("drop_me");
   });
 
+  it("mcp_servers keeps only the listed servers' tools, matched by namespace", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: true, mcpServers: ["aws-docs"] }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(["read"]);
+    const tool = (ns?: string) => ({ definition: ns ? { namespace: { name: ns } } : {} });
+    loaderExtensionsRef.current = {
+      extensions: [
+        {
+          path: "/ext/mcp.ts",
+          tools: new Map<string, unknown>([
+            ["mcp__aws_docs__search", tool("mcp__aws_docs")],
+            // A server named `aws-docs__admin` shares the name prefix but not the namespace.
+            ["mcp__aws_docs__admin__drop", tool("mcp__aws_docs__admin")],
+            // pi shortens long names with a hash; the namespace still identifies the server.
+            ["mcp__aws_docs_1a2b3c4d", tool("mcp__aws_docs")],
+            ["other_tool", tool()],
+          ]),
+        },
+      ],
+      errors: [],
+      runtime: {},
+    } as any;
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const gate = (name: string) => session.agent.beforeToolCall?.({ toolCall: { name } });
+    await expect(gate("mcp__aws_docs__search")).resolves.toBeUndefined();
+    await expect(gate("mcp__aws_docs_1a2b3c4d")).resolves.toBeUndefined();
+    await expect(gate("other_tool")).resolves.toBeUndefined();
+    await expect(gate("mcp__aws_docs__admin__drop")).resolves.toMatchObject({ block: true });
+  });
+
   it("beforeToolCall blocks an out-of-scope tool and delegates otherwise", async () => {
     // Turn 1 cannot be narrowed — before_agent_start fires inside prompt() and
     // may widen the set after the turn's tools are snapshotted — so a call-time
@@ -2330,31 +2365,6 @@ describe("agent-runner unknown built-in tools", () => {
 });
 
 // ─── ext: tool selectors in `tools:` (opt-in flip) ──────────────────────
-describe("toolSelectorMatches", () => {
-  it("matches exact names without *", () => {
-    expect(toolSelectorMatches("bar", "bar")).toBe(true);
-    expect(toolSelectorMatches("bar", "barx")).toBe(false);
-  });
-  it("a trailing * is a name prefix for tools without a namespace", () => {
-    expect(toolSelectorMatches("bar_*", "bar_x")).toBe(true);
-    expect(toolSelectorMatches("bar_*", "baz_x")).toBe(false);
-    expect(toolSelectorMatches("b*r", "bxr")).toBe(false);
-  });
-  it("a namespaced tool needs the whole namespace, so server aws does not admit aws__admin", () => {
-    expect(toolSelectorMatches("mcp__aws__*", "mcp__aws__search", "mcp__aws")).toBe(true);
-    expect(toolSelectorMatches("mcp__aws__*", "mcp__aws__admin__drop", "mcp__aws__admin")).toBe(false);
-    expect(toolSelectorMatches("mcp__aws__admin__*", "mcp__aws__admin__drop", "mcp__aws__admin")).toBe(true);
-  });
-  it("a namespace selector keeps tools whose names pi shortened with a hash", () => {
-    expect(toolSelectorMatches("mcp__long_server__*", "mcp__long_servXa1b2c3", "mcp__long_server")).toBe(true);
-  });
-  it("a narrower prefix inside the namespace still filters by name", () => {
-    expect(toolSelectorMatches("mcp__aws__search_*", "mcp__aws__search_docs", "mcp__aws")).toBe(true);
-    expect(toolSelectorMatches("mcp__aws__search_*", "mcp__aws__read", "mcp__aws")).toBe(false);
-    expect(toolSelectorMatches("mcp__a*", "mcp__aws__read", "mcp__aws")).toBe(false);
-  });
-});
-
 describe("parseExtSelectors", () => {
   it("bare ext:foo → name only, no narrowing", () => {
     const { extNames, narrowing } = parseExtSelectors(["ext:foo"]);
@@ -2459,23 +2469,6 @@ describe("agent-runner ext: tool selectors", () => {
     expect(tools).toContain("read");
     expect(tools).toContain("bar");
     expect(tools).not.toContain("baz");
-  });
-
-  it("ext:foo/prefix* narrows foo to tools with that prefix", async () => {
-    setupExtAgent({ extensions: true, builtinToolNames: ["read"], extSelectors: ["ext:foo/mcp__aws__*"] });
-    withExtensions({ "/ext/foo.ts": ["mcp__aws__search", "mcp__aws__read", "mcp__clickup__search"] });
-    const { session } = createSession("OK");
-    createAgentSession.mockResolvedValue({ session });
-
-    await runAgent(ctx, "Explore", "go", { pi });
-
-    const tools = lastToolsPassed();
-    expect(tools).toContain("mcp__aws__search");
-    expect(tools).toContain("mcp__aws__read");
-    expect(tools).not.toContain("mcp__clickup__search");
-    await expect(
-      session.agent.beforeToolCall?.({ toolCall: { name: "mcp__clickup__search" } }),
-    ).resolves.toMatchObject({ block: true });
   });
 
   it("ext:foo is orphaned when extensions: false — no extension loads, warning fires", async () => {

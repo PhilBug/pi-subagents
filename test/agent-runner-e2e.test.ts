@@ -195,16 +195,6 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     expect(active).not.toContain("exposure_direct"); // narrowed away
   });
 
-  it("a wildcard narrowing on one extension does not activate another's defaultActive: false tool", async () => {
-    const active = await activeToolsFor({
-      extensions: [FIXTURE, EXPOSURE_FIXTURE],
-      extSelectors: [`ext:${extensionCanonicalName(FIXTURE)}/*`, `ext:${extensionCanonicalName(EXPOSURE_FIXTURE)}`],
-    });
-    expect(active).toContain(EXT_TOOL);
-    expect(active).toContain("exposure_direct");
-    expect(active).not.toContain("exposure_off_by_default");
-  });
-
   // pi's built-in MCP starts each stdio server in `.pi/mcp.json` when a session
   // starts, so a server whose command touches a marker file shows, on the real
   // runtime, whether a subagent ran a project's MCP config.

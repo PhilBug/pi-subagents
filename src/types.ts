@@ -42,6 +42,8 @@ export interface AgentConfig {
   /** Raw `ext:` selector entries from the `tools:` CSV, e.g. ["ext:foo", "ext:bar/x"].
    * Presence of any entry flips extension tools to an explicit allowlist. */
   extSelectors?: string[];
+  /** MCP servers (`mcp.json` names) whose tools this agent may call. undefined = all, [] = none. */
+  mcpServers?: string[];
   /** Tool denylist — these tools are removed even if `builtinToolNames` or extensions include them. */
   disallowedTools?: string[];
   /** true = inherit all, string[] = only listed, false = none */
