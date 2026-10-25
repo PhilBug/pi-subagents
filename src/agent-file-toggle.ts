@@ -277,6 +277,7 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   if (cfg.skills === false) fmFields.push("skills: false");
   else if (Array.isArray(cfg.skills)) fmFields.push(`skills: ${cfg.skills.join(", ")}`);
   if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
+  if (cfg.mcpServers) fmFields.push(`mcp_servers: ${cfg.mcpServers.length ? JSON.stringify(cfg.mcpServers.join(", ")) : "none"}`);
   if (cfg.inheritContext) fmFields.push("inherit_context: true");
   // Both cases, not just `true`: with `backgroundByDefault` on, omitting the
   // field means background, so `false` is the only way to pin an agent file to

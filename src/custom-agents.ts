@@ -193,6 +193,7 @@ function loadOneFile(path: string, agents: Map<string, AgentConfig>, source: Age
     builtinToolNames,
     extSelectors,
     disallowedTools: csvListOptional(fm.disallowed_tools),
+    mcpServers: parseMcpServers(fm.mcp_servers),
     extensions: inheritField(fm.extensions ?? fm.inherit_extensions),
     excludeExtensions: csvListOptional(fm.exclude_extensions),
     skills: inheritField(fm.skills ?? fm.inherit_skills),
@@ -325,6 +326,18 @@ function parseCsvField(val: unknown): string[] | undefined {
   if (!s || s === "none") return undefined;
   const items = s.split(",").map(t => t.trim()).filter(Boolean);
   return items.length > 0 ? items : undefined;
+}
+
+/**
+ * Parse the MCP server allowlist: omitted/"all"/"*"/`true` → undefined (every
+ * server); empty/"none"/`false` → [] (no server); csv → only the listed servers.
+ * Unlike other csv fields, "none" must not mean "unset", or it would grant all.
+ */
+function parseMcpServers(val: unknown): string[] | undefined {
+  if (val === undefined || val === null || val === true) return undefined;
+  if (val === false) return [];
+  const items = parseCsvField(val) ?? [];
+  return items.some((s) => s === "*" || s.toLowerCase() === "all") ? undefined : items;
 }
 
 /**

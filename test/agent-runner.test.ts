@@ -1712,6 +1712,46 @@ describe("agent-runner async extension tool registration", () => {
     expect(session.getActiveToolNames()).not.toContain("drop_me");
   });
 
+  it("mcp_servers keeps only the listed servers' tools, matched by namespace", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: true, mcpServers: ["aws-docs"] }),
+    );
+    // A plain `tools:` entry must not readmit a denied server's tool.
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(["read", "mcp__aws_docs__admin__drop"]);
+    const tool = (ns?: string) => ({ definition: ns ? { namespace: { name: ns } } : {} });
+    loaderExtensionsRef.current = {
+      extensions: [
+        {
+          path: "/ext/mcp.ts",
+          tools: new Map<string, unknown>([
+            ["mcp__aws_docs__search", tool("mcp__aws_docs")],
+            // A server named `aws-docs__admin` shares the name prefix but not the namespace.
+            ["mcp__aws_docs__admin__drop", tool("mcp__aws_docs__admin")],
+            // pi shortens long names with a hash; the namespace still identifies the server.
+            ["mcp__aws_docs_1a2b3c4d", tool("mcp__aws_docs")],
+            ["other_tool", tool()],
+            // Reaches any server through its arguments, so it cannot be scoped.
+            ["read_mcp_resource", tool()],
+          ]),
+        },
+      ],
+      errors: [],
+      runtime: {},
+    } as any;
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const gate = (name: string) => session.agent.beforeToolCall?.({ toolCall: { name } });
+    await expect(gate("mcp__aws_docs__search")).resolves.toBeUndefined();
+    await expect(gate("mcp__aws_docs_1a2b3c4d")).resolves.toBeUndefined();
+    await expect(gate("other_tool")).resolves.toBeUndefined();
+    await expect(gate("mcp__aws_docs__admin__drop")).resolves.toMatchObject({ block: true });
+    await expect(gate("read_mcp_resource")).resolves.toMatchObject({ block: true });
+  });
+
   it("beforeToolCall blocks an out-of-scope tool and delegates otherwise", async () => {
     // Turn 1 cannot be narrowed — before_agent_start fires inside prompt() and
     // may widen the set after the turn's tools are snapshotted — so a call-time
