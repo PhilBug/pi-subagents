@@ -272,10 +272,30 @@ export function installExtensionToolScope(
     readmitToolNames: Set<string>;
     /** Receives the scope check the child's nested-call gate extension applies. */
     nestedCallGate: NestedCallGate;
+    /** `mcp_servers:` — servers whose MCP tools stay in scope; undefined = all. */
+    mcpServers?: string[];
   },
 ): void {
   const { loader, toolNames, disallowedSet, extNames, narrowing, mcpToolPatterns, readmitToolNames, nestedCallGate } =
     ctx;
+  // pi groups each server's tools in namespace `mcp__<server>`, `-` mapped to `_`
+  // (core/mcp-servers.ts `mcpNamespace`). The namespace, unlike the tool name, is
+  // never shortened and cannot be confused with another server's.
+  const mcpNamespaces = ctx.mcpServers && new Set(ctx.mcpServers.map((s) => `mcp__${s.replace(/-/g, "_")}`));
+  // Tools `mcp_servers:` denies wherever else they were admitted (a plain `tools:` entry
+  // included). pi's resource tools take the server as an argument, so they cannot be
+  // scoped by namespace and are denied whenever the server list is restricted.
+  const mcpDenied = (): string[] => {
+    if (!mcpNamespaces) return [];
+    const denied = [...MCP_RESOURCE_TOOL_NAMES];
+    for (const extension of loader.getExtensions().extensions) {
+      for (const [name, tool] of extension.tools) {
+        const ns = tool.definition?.namespace?.name;
+        if (ns?.startsWith("mcp__") && !mcpNamespaces.has(ns)) denied.push(name);
+      }
+    }
+    return denied;
+  };
 
   // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
   // selector is present, extension tools become an explicit allowlist — a loaded
@@ -311,6 +331,7 @@ export function installExtensionToolScope(
       }
     }
     for (const name of EXCLUDED_TOOL_NAMES) keep.delete(name);
+    for (const name of mcpDenied()) keep.delete(name);
     // Injected tools are legitimately active for this agent — re-admit them so
     // the renarrow keeps them in the active set and beforeToolCall doesn't
     // block them. Already vetted against `disallowed_tools` by the caller,
@@ -1310,6 +1331,7 @@ export async function runAgent(
       mcpToolPatterns: isolated ? undefined : agentConfig?.mcpToolPatterns,
       readmitToolNames,
       nestedCallGate,
+      mcpServers: agentConfig?.mcpServers,
     });
   }
 

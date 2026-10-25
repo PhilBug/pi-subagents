@@ -45,6 +45,8 @@ export interface AgentConfig {
   /** Bare `mcp__` entries from the `tools:` CSV (exact names or `*` patterns), as in
    * pi's `--tools`: MCP tools are narrowed to the matching ones. */
   mcpToolPatterns?: string[];
+  /** MCP servers (`mcp.json` names) whose tools this agent may call. undefined = all, [] = none. */
+  mcpServers?: string[];
   /** Tool denylist — these tools are removed even if `builtinToolNames` or extensions include them. */
   disallowedTools?: string[];
   /** true = inherit all, string[] = only listed, false = none */
