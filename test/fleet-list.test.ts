@@ -611,6 +611,20 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.overlayOpened()).toBe(false);
   });
 
+  it("a click on a bg_run task opens its viewer, labelled by name with its state", () => {
+    const h = harness([makeRecord()]);
+    const opened: string[] = [];
+    h.fleet.setBgTaskSource(
+      () => [{ id: "t1", name: "tick loop", command: "sleep 90", status: "running", cwd: "/tmp", startTime: Date.now() }],
+      id => { opened.push(id); return new Promise<void>(() => {}); },
+    );
+    h.fleet.update();
+    expect(h.render().find(l => l.includes("tick loop"))).toContain("running");
+    h.mouse("tick loop");
+    expect(opened).toEqual(["t1"]);
+    expect(h.overlayOpened()).toBe(false);
+  });
+
   it("Enter on 'main' just deactivates (no overlay)", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN); // active, index 0 (main)

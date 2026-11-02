@@ -23,6 +23,7 @@ import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryDat
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { BgTasksClient } from "./bg-tasks.js";
 import { inChildSessionContext } from "./child-context.js";
 import { CompletionOutbox, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -60,6 +61,7 @@ import {
   type Theme,
   type UICtx,
 } from "./ui/agent-widget.js";
+import { BgTaskViewer } from "./ui/bg-task-viewer.js";
 import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroundAction } from "./ui/conversation-viewer.js";
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
@@ -848,6 +850,9 @@ export default function (pi: ExtensionAPI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
       watchHandoffKey(ctx.ui);
+      bgTasks?.dispose();
+      bgTasks = new BgTasksClient(pi.events, () => fleet.update());
+      bgTasks.start();
     }
     manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
@@ -1169,6 +1174,8 @@ export default function (pi: ExtensionAPI) {
     widget.dispose();
     outbox.dispose();
     fleet.dispose();
+    bgTasks?.dispose();
+    bgTasks = undefined;
     unsubHandoffKey?.();
     unsubHandoffKey = undefined;
     handoffKeyUi = undefined;
@@ -1285,6 +1292,23 @@ export default function (pi: ExtensionAPI) {
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
     (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
     getFullscreenScrollbar, backgroundActionFor);
+  // `bg_run` tasks from pi-background-tasks, listed with the agents. One client
+  // per session: its lease belongs to that extension's current activation.
+  let bgTasks: BgTasksClient | undefined;
+  fleet.setBgTaskSource(() => bgTasks?.tasks() ?? [], async (id) => {
+    const ctx = currentCtx;
+    const client = bgTasks;
+    const task = client?.tasks().find(t => t.id === id);
+    if (!ctx?.hasUI || !client || !task) return;
+    let overlayOptions = getConversationOverlayOptions({ mode: "regular" });
+    await ctx.ui.custom<undefined>(
+      (tui, theme, keybindings, done) => {
+        overlayOptions = getConversationOverlayOptions(tui);
+        return new BgTaskViewer(tui, client, task, theme, () => done(undefined), keybindings);
+      },
+      { overlay: true, overlayOptions: () => overlayOptions },
+    );
+  });
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }

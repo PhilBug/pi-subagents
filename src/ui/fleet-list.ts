@@ -15,6 +15,7 @@
 import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import type { BgTask } from "../bg-tasks.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
@@ -73,7 +74,17 @@ export interface FleetWorkflow {
 type MainEntry = { kind: "main" };
 type AgentEntry = { kind: "agent"; record: AgentRecord };
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
-type FleetEntry = MainEntry | WorkflowEntry | AgentEntry;
+type BgTaskEntry = { kind: "bg"; task: BgTask };
+type FleetEntry = MainEntry | WorkflowEntry | AgentEntry | BgTaskEntry;
+
+/** `running`, `exit 0`, `exit 2`, `stopped`, … — how a bg task stands or ended. */
+export function formatBgTaskState(task: Pick<BgTask, "status" | "exitCode" | "signal">): string {
+  if (task.status === "running") return "running";
+  if (task.status === "killed") return "stopped";
+  if (task.exitCode != null) return `exit ${task.exitCode}`;
+  if (task.signal) return task.signal;
+  return task.status;
+}
 
 /** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
 export function formatFleetElapsed(ms: number): string {
@@ -130,6 +141,11 @@ export class FleetList {
    * minus the close handle, because that overlay belongs to the extension.
    */
   private viewingWorkflowId: string | undefined;
+  /** `bg_run` tasks from pi-background-tasks, injected like workflows. */
+  private bgTaskSource: (() => readonly BgTask[]) | undefined;
+  private openBgTask: ((id: string) => Promise<void> | void) | undefined;
+  /** Set while a bg task viewer is up; same role as `viewingWorkflowId`. */
+  private viewingBgTaskId: string | undefined;
 
   constructor(
     private manager: AgentManager,
@@ -202,6 +218,7 @@ export class FleetList {
     // No handle to close the workflow inspector with, but the list is going
     // away — leaving the id set would keep it swallowing input forever.
     this.viewingWorkflowId = undefined;
+    this.viewingBgTaskId = undefined;
     if (this.ui && this.widgetRegistered) this.ui.setWidget(FLEET_KEY, undefined);
     this.widgetRegistered = false;
     this.tui = undefined;
@@ -297,6 +314,25 @@ export class FleetList {
     this.openWorkflow = open;
   }
 
+  /** Wire `bg_run` tasks into the list; the opener shows one task's viewer. */
+  setBgTaskSource(source: () => readonly BgTask[], open: (id: string) => Promise<void> | void): void {
+    this.bgTaskSource = source;
+    this.openBgTask = open;
+  }
+
+  /** Running tasks, the one being viewed, and recently finished ones. */
+  private bgTasks(): BgTask[] {
+    if (!this.bgTaskSource) return [];
+    const now = Date.now();
+    return [...this.bgTaskSource()]
+      .filter(task =>
+        task.status === "running"
+        || task.id === this.viewingBgTaskId
+        || (task.endTime != null && now - task.endTime < FINISHED_LINGER_MS)
+      )
+      .sort((a, b) => a.startTime - b.startTime);
+  }
+
   /** Live runs, plus recently settled ones — the same linger the agents get. */
   private workflows(): FleetWorkflow[] {
     if (!this.workflowSource) return [];
@@ -320,6 +356,7 @@ export class FleetList {
       { kind: "main" },
       ...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })),
       ...this.agentRecords().map(record => ({ kind: "agent" as const, record })),
+      ...this.bgTasks().map(task => ({ kind: "bg" as const, task })),
     ];
   }
 
@@ -341,7 +378,7 @@ export class FleetList {
     // While an overlay is open, let it own all input. Checked before the focus
     // test below, which would otherwise read the dialog holding the keyboard as
     // "the user left the list" and reset the selection out from under it.
-    if (this.viewerClose || this.viewingWorkflowId) return undefined;
+    if (this.viewerClose || this.viewingWorkflowId || this.viewingBgTaskId) return undefined;
     // Input listeners fire BEFORE the focused component, and dialogs
     // (ctx.ui.select/confirm/input, pi's own menus) swap the prompt editor out
     // while getEditorText() still reads the detached — empty — editor. So when
@@ -394,7 +431,9 @@ export class FleetList {
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (event.type !== "press" || event.button !== "left") return undefined;
-    if (!this.enabled || this.viewerClose || this.viewingWorkflowId !== undefined) return undefined;
+    if (!this.enabled || this.viewerClose || this.viewingWorkflowId !== undefined || this.viewingBgTaskId !== undefined) {
+      return undefined;
+    }
     if (!this.editorHasFocus()) return undefined;
     const target = this.lineTargets[event.y];
     if (target === undefined || target >= this.roster().length) return undefined;
@@ -449,6 +488,14 @@ export class FleetList {
       );
       return;
     }
+    if (entry.kind === "bg") {
+      this.viewingBgTaskId = entry.task.id;
+      void Promise.resolve(this.openBgTask?.(entry.task.id)).then(
+        () => this.clearViewer(),
+        () => this.clearViewer(),
+      );
+      return;
+    }
     const record = entry.record;
     if (!this.ui) return;
     if (!record.session) {
@@ -496,11 +543,12 @@ export class FleetList {
     // still feels natural if the list reordered (an earlier agent finished)
     // while the overlay was open. If that agent is gone, leave the index for
     // update()'s clamp to settle.
-    const viewed = this.viewingAgentId ?? this.viewingWorkflowId;
+    const viewed = this.viewingAgentId ?? this.viewingWorkflowId ?? this.viewingBgTaskId;
     if (viewed !== undefined) {
       const idx = this.roster().findIndex(e =>
         e.kind === "agent" ? e.record.id === viewed
         : e.kind === "workflow" ? e.workflow.id === viewed
+        : e.kind === "bg" ? e.task.id === viewed
         : false,
       );
       if (idx >= 0) this.selectedIndex = idx;
@@ -508,13 +556,14 @@ export class FleetList {
     this.viewerClose = undefined;
     this.viewingAgentId = undefined;
     this.viewingWorkflowId = undefined;
+    this.viewingBgTaskId = undefined;
     this.update();
   }
 
   // ---- Rendering ----
 
   private renderBar(width: number, theme: Theme): string[] {
-    const rows = this.roster().slice(1) as (WorkflowEntry | AgentEntry)[];
+    const rows = this.roster().slice(1) as (WorkflowEntry | AgentEntry | BgTaskEntry)[];
     this.lineTargets = [];
     if (rows.length === 0) return [];
     // Clamp locally so a render between a roster shrink and the next update()
@@ -543,6 +592,8 @@ export class FleetList {
       lines.push(
         row.kind === "workflow" ?
           this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme)
+        : row.kind === "bg" ?
+          this.renderBgTaskRow(a + 1, sel, row.task, width, theme)
         : this.renderAgentRow(a + 1, sel, row.record, width, theme),
       );
     }
@@ -577,6 +628,18 @@ export class FleetList {
     const elapsed = (workflow.completedAt ?? Date.now()) - workflow.startedAt;
     const agents = `${workflow.doneCount}/${workflow.totalCount} agent${workflow.totalCount === 1 ? "" : "s"}`;
     const stats = `${agents} · ${formatFleetElapsed(elapsed)} · ${formatFleetTokens(workflow.tokens)}`;
+    return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
+  }
+
+  /** A `bg_run` task: `bg`, its name (or command), elapsed and how it ended. */
+  private renderBgTaskRow(rosterIndex: number, sel: number, task: BgTask, width: number, theme: Theme): string {
+    const selected = rosterIndex === sel;
+    const kind = theme.fg(selected ? "text" : "muted", "bg");
+    const label = task.name ?? task.command.split("\n")[0];
+    const name = selected ? theme.fg("text", label) : label;
+    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${kind}  ${name}`;
+    const elapsed = formatFleetElapsed((task.endTime ?? Date.now()) - task.startTime);
+    const stats = `${elapsed} · ${formatBgTaskState(task)}`;
     return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
   }
 
