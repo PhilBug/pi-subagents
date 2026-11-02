@@ -361,6 +361,29 @@ describe("FleetList navigation", () => {
     expect(h.render()).toEqual([]);
   });
 
+  it("shows an agent whose session arrives after its start notification", () => {
+    vi.useFakeTimers();
+    try {
+      const agent = makeRecord({ id: "a1", session: undefined });
+      let widget: { render(w: number): string[] } | undefined;
+      const fleet = new FleetList(fakeManager([agent]), new Map());
+      fleet.setUICtx({
+        setWidget: (_k, content) => { widget = content?.({ requestRender: () => {} }, theme as any); },
+        onTerminalInput: () => () => {}, getEditorText: () => "",
+        notify: () => {}, custom: (() => new Promise<undefined>(() => {})) as FleetUICtx["custom"],
+      });
+      fleet.ensureTimer(); // as index.ts does in the manager's onStart,
+      fleet.update();      // which fires before onSessionCreated
+      expect(widget).toBeUndefined();
+      agent.session = FAKE_SESSION as any;
+      vi.advanceTimersByTime(250);
+      expect(widget?.render(120).some(l => l.includes("Sleep then report 1"))).toBe(true);
+      fleet.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("re-arms the refresh timer when the list is re-shown (toggle off→on)", () => {
     vi.useFakeTimers();
     try {

@@ -225,7 +225,7 @@ export class FleetList {
         this.widgetRegistered = false;
         this.tui = undefined;
       }
-      if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
+      if (this.timer && !this.hasSessionlessAgents()) { clearInterval(this.timer); this.timer = undefined; }
       this.active = false;
       this.selectedIndex = 0;
       return;
@@ -247,6 +247,17 @@ export class FleetList {
     } else {
       this.tui?.requestRender();
     }
+  }
+
+  /**
+   * The manager announces a start before the agent's session exists, so such an
+   * agent has no row yet; keep ticking until it gets one, or nothing else would
+   * show it before it finishes.
+   */
+  private hasSessionlessAgents(): boolean {
+    return this.enabled && this.manager.listAgents().some(a =>
+      isTopLevelAgent(a) && !a.session && (a.status === "running" || a.status === "queued"),
+    );
   }
 
   // ---- Roster ----
