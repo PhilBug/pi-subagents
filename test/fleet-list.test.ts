@@ -94,6 +94,8 @@ interface Harness {
   press: (data: string) => { consume?: boolean } | undefined;
   /** Render the currently-registered below-editor widget at the given width. */
   render: (width?: number) => string[];
+  /** Render, then send a mouse event at the first line containing `text`. */
+  mouse: (text: string, over?: { type?: "press" | "release"; button?: "left" | "right" }) => unknown;
   setEditorText: (t: string) => void;
   /** Whether an overlay has been opened. */
   overlayOpened: () => boolean;
@@ -129,7 +131,7 @@ function harness(
 ): Harness {
   const notices: string[] = [];
   let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
-  let widgetFactory: ((tui: any, theme: any) => { render(w: number): string[] }) | undefined;
+  let widgetFactory: ((tui: any, theme: any) => { render(w: number): string[]; handleMouse?(e: any): unknown }) | undefined;
   let editorText = "";
   let opened = false;
   let closed = false;
@@ -182,6 +184,16 @@ function harness(
     overlayOptions: () => overlayOptions,
     press: (data) => inputHandler?.(data),
     render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, theme).render(width) : []),
+    mouse: (text, over = {}) => {
+      const widget = widgetFactory!(fakeTui, theme);
+      const lines = widget.render(120);
+      const y = lines.findIndex(l => plain(l).includes(text));
+      expect(y).toBeGreaterThanOrEqual(0);
+      return widget.handleMouse?.({
+        type: over.type ?? "press", button: over.button ?? "left", x: 4, y, screenX: 4, screenY: 30 + y,
+        width: 120, height: lines.length, shift: false, alt: false, ctrl: false,
+      });
+    },
     setEditorText: (t) => { editorText = t; },
     overlayOpened: () => opened,
     overlayClosed: () => closed,
@@ -538,6 +550,42 @@ describe("FleetList overlay lifecycle", () => {
       await h.closeOverlay();
       h.fleet.dispose();
     }
+  });
+
+  it("a left click on an agent row opens its viewer", async () => {
+    const h = harness([
+      makeRecord({ id: "a1", description: "one" }),
+      makeRecord({ id: "a2", description: "two" }),
+    ]);
+    expect(h.mouse("two")).toEqual({ handled: true });
+    expect(h.overlayOpened()).toBe(true);
+    await h.closeOverlay();
+    expect(h.render().find(l => l.includes("two"))).toContain("●");
+  });
+
+  it("ignores right clicks, releases and non-row lines", () => {
+    const h = harness([makeRecord({ description: "one" })]);
+    expect(h.mouse("one", { button: "right" })).toBeUndefined();
+    expect(h.mouse("one", { type: "release" })).toBeUndefined();
+    expect(h.mouse("for agents")).toBeUndefined();
+    expect(h.overlayOpened()).toBe(false);
+  });
+
+  it("a click on 'main' returns to the prompt without an overlay", () => {
+    const h = harness([makeRecord()]);
+    h.press(DOWN);
+    h.press(DOWN);
+    expect(h.mouse("main")).toEqual({ handled: true });
+    expect(h.overlayOpened()).toBe(false);
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+  });
+
+  it("a click on a workflow row opens the inspector", () => {
+    const h = harness([makeRecord()]);
+    h.setWorkflows([makeWorkflow()]);
+    h.mouse("audit-src");
+    expect(h.openedWorkflows()).toEqual(["wf_abc123"]);
+    expect(h.overlayOpened()).toBe(false);
   });
 
   it("Enter on 'main' just deactivates (no overlay)", () => {

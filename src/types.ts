@@ -42,6 +42,9 @@ export interface AgentConfig {
   /** Raw `ext:` selector entries from the `tools:` CSV, e.g. ["ext:foo", "ext:bar/x"].
    * Presence of any entry flips extension tools to an explicit allowlist. */
   extSelectors?: string[];
+  /** Bare `mcp__` entries from the `tools:` CSV (exact names or `*` patterns), as in
+   * pi's `--tools`: MCP tools are narrowed to the matching ones. */
+  mcpToolPatterns?: string[];
   /** MCP servers (`mcp.json` names) whose tools this agent may call. undefined = all, [] = none. */
   mcpServers?: string[];
   /** Tool denylist — these tools are removed even if `builtinToolNames` or extensions include them. */
@@ -149,6 +152,8 @@ export interface AgentTombstone {
   /** Always set — a record with no session file is never tombstoned. */
   sessionFile: string;
   completedAt: number;
+  /** The agent's work lived in a worktree that is now gone; reopening is refused. */
+  worktreeLost?: boolean;
 }
 
 /**

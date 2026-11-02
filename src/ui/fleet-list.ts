@@ -9,9 +9,10 @@
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
  * handling goes through `onTerminalInput` — which fires before the focused editor and
  * can `consume` keys — gated on `getEditorText() === ""` so normal typing is untouched.
+ * In fullscreen mode a left click on a row selects and opens it, like ↓…Enter.
  */
 
-import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
@@ -32,7 +33,12 @@ const FINISHED_LINGER_MS = 4000;
 export type FleetUICtx = {
   setWidget(
     key: string,
-    content: undefined | ((tui: any, theme: Theme) => { render(width: number): string[]; invalidate(): void; dispose?(): void }),
+    content: undefined | ((tui: any, theme: Theme) => {
+      render(width: number): string[];
+      invalidate(): void;
+      dispose?(): void;
+      handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
+    }),
     options?: { placement?: "aboveEditor" | "belowEditor" },
   ): void;
   onTerminalInput(handler: (data: string) => { consume?: boolean; data?: string } | undefined): () => void;
@@ -108,6 +114,8 @@ export class FleetList {
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
   private selectedIndex = 0;
+  /** Roster index of each line of the last render; undefined for non-row lines. */
+  private lineTargets: (number | undefined)[] = [];
   /** Set while a conversation overlay is open; calling it closes the overlay. */
   private viewerClose: (() => void) | undefined;
   private viewingAgentId: string | undefined;
@@ -231,6 +239,7 @@ export class FleetList {
         this.tui = tui;
         return {
           render: (w: number) => this.renderBar(w, theme),
+          handleMouse: (event: TuiMouseEvent) => this.handleMouse(event),
           invalidate: () => { this.widgetRegistered = false; this.tui = undefined; },
         };
       }, { placement: "belowEditor" });
@@ -368,6 +377,28 @@ export class FleetList {
   }
 
   /**
+   * Fullscreen-only (pi routes no mouse events in regular mode). A left press on
+   * a row does what ↓…Enter would: `main` returns to the prompt, any other row
+   * opens. Other events and non-row lines fall through to pi's own handling.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type !== "press" || event.button !== "left") return undefined;
+    if (!this.enabled || this.viewerClose || this.viewingWorkflowId !== undefined) return undefined;
+    if (!this.editorHasFocus()) return undefined;
+    const target = this.lineTargets[event.y];
+    if (target === undefined || target >= this.roster().length) return undefined;
+    if (target === 0) {
+      this.deactivate();
+      return { handled: true };
+    }
+    this.active = true;
+    this.selectedIndex = target;
+    this.update();
+    this.openSelected();
+    return { handled: true };
+  }
+
+  /**
    * True when pi's prompt editor owns the keyboard. The editor is pluggable
    * (ui.setEditorComponent) and need not extend `Editor` (#374), so match pi-tui's
    * `EditorComponent` contract instead: `getText` + `setText`, which pi calls on
@@ -473,6 +504,7 @@ export class FleetList {
 
   private renderBar(width: number, theme: Theme): string[] {
     const rows = this.roster().slice(1) as (WorkflowEntry | AgentEntry)[];
+    this.lineTargets = [];
     if (rows.length === 0) return [];
     // Clamp locally so a render between a roster shrink and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
@@ -484,6 +516,7 @@ export class FleetList {
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
     lines.push("");
+    this.lineTargets[lines.length] = 0;
     lines.push(truncateToWidth(`  ${this.bullet(0, sel, theme)} main`, width));
 
     // Window the rows so the selected one stays visible.
@@ -495,6 +528,7 @@ export class FleetList {
     if (start > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${start} more`), width));
     for (let a = start; a < start + visible; a++) {
       const row = rows[a];
+      this.lineTargets[lines.length] = a + 1;
       lines.push(
         row.kind === "workflow" ?
           this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme)
