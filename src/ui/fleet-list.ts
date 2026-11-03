@@ -121,6 +121,8 @@ export class FleetList {
   private timer: ReturnType<typeof setInterval> | undefined;
 
   private enabled = true;
+  /** ctrl+h: the list is out of sight for now; unlike `enabled`, never saved. */
+  private hidden = false;
   /** Whether arrow keys currently navigate the list (vs. flow to the editor). */
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
@@ -234,7 +236,7 @@ export class FleetList {
     // it is the thing the user opens to see what its children did. Read off the
     // roster for the same reason activation does: two counts of "is there
     // anything here" drifted apart once before.
-    const hasRows = this.enabled && this.roster().length > 1;
+    const hasRows = this.enabled && !this.hidden && this.roster().length > 1;
 
     if (!hasRows) {
       if (this.widgetRegistered) {
@@ -387,6 +389,16 @@ export class FleetList {
       if (this.active) this.deactivate();
       return undefined;
     }
+
+    // A legacy terminal sends ctrl+h as \x08, which pi also reads as backspace;
+    // only the unambiguous kitty/modifyOtherKeys encoding toggles.
+    if (data !== "\x08" && matchesKey(data, "ctrl+h")) {
+      this.hidden = !this.hidden;
+      if (this.hidden) this.active = false;
+      this.update();
+      return { consume: true };
+    }
+    if (this.hidden) return undefined;
 
     if (!this.active) {
       // Activate: ↓ or ← at an empty prompt moves focus into the list.
@@ -571,8 +583,8 @@ export class FleetList {
     const sel = Math.min(this.selectedIndex, rows.length);
 
     const hint = this.active
-      ? "↑↓ select · enter view · esc back"
-      : "esc to interrupt · ← for agents · ↓ to manage";
+      ? "↑↓ select · enter view · esc back · ctrl+h hide"
+      : "esc to interrupt · ← for agents · ↓ to manage · ctrl+h hide";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
     lines.push("");

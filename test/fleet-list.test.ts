@@ -611,6 +611,18 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.overlayOpened()).toBe(false);
   });
 
+  it("ctrl+h hides the list until pressed again; a bare \\x08 (backspace) does not", () => {
+    const h = harness([makeRecord()]);
+    h.fleet.update();
+    expect(h.render().some(l => l.includes("main"))).toBe(true);
+    expect(h.press("\x08")).toBeUndefined();
+    expect(h.press("\x1b[104;5u")).toEqual({ consume: true });
+    expect(h.render()).toEqual([]);
+    expect(h.press(DOWN)).toBeUndefined();
+    h.press("\x1b[104;5u");
+    expect(h.render().some(l => l.includes("main"))).toBe(true);
+  });
+
   it("a click on a bg_run task opens its viewer, labelled by name with its state", () => {
     const h = harness([makeRecord()]);
     const opened: string[] = [];
