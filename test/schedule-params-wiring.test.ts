@@ -69,11 +69,13 @@ describe("Agent tool → persisted scheduled job", () => {
   it("persists the run-shaping params the job will fire with", async () => {
     const { job, restore } = await scheduleAndReadBack({
       subagent_type: "general-purpose",
+      schedule_precheck: "cmux-changed",
       thinking: "high",
       isolated: true,
       isolation: "worktree",
     });
     try {
+      expect(job.schedule_precheck).toBe("cmux-changed");
       expect(job.thinking).toBe("high");
       expect(job.isolated).toBe(true);
       expect(job.isolation).toBe("worktree");
@@ -215,6 +217,16 @@ describe("Agent tool → schedule restrictions", () => {
       } finally {
         restore();
       }
+    }
+  });
+
+  it.each([undefined, "+1h"])("refuses a precheck without a recurring schedule (%s)", async schedule => {
+    const { reply, jobCount, restore } = await scheduleCall({ schedule, schedule_precheck: "cmux-changed" });
+    try {
+      expect(reply).toBe("schedule_precheck requires a recurring schedule.");
+      expect(jobCount).toBe(0);
+    } finally {
+      restore();
     }
   });
 

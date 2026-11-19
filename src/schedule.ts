@@ -31,13 +31,24 @@ export type ScheduleChangeEvent =
   | { type: "removed"; jobId: string }
   | { type: "updated"; job: ScheduledSubagent }
   | { type: "fired"; jobId: string; agentId: string; name: string }
+  | { type: "skipped"; jobId: string }
   | { type: "error"; jobId: string; error: string };
+
+export interface SchedulePrecheckRequest {
+  name: string;
+  cwd: string;
+  signal: AbortSignal;
+  respondWith(check: () => boolean | Promise<boolean>): void;
+}
+
+const PRECHECK_TIMEOUT_MS = 10_000;
 
 /** Params accepted at job creation — ID, timestamps, and state are derived. */
 export interface NewJobInput {
   name: string;
   description: string;
   schedule: string;
+  schedule_precheck?: string;
   subagent_type: SubagentType;
   prompt: string;
   model?: string;
@@ -50,6 +61,7 @@ export interface NewJobInput {
 export class SubagentScheduler {
   private jobs = new Map<string, Cron>();
   private intervals = new Map<string, NodeJS.Timeout>();
+  private precheckedRuns = new Map<string, { precheck?: AbortController }>();
   private store: ScheduleStore | undefined;
   private pi: ExtensionAPI | undefined;
   private ctx: ExtensionContext | undefined;
@@ -73,6 +85,7 @@ export class SubagentScheduler {
     this.jobs.clear();
     for (const t of this.intervals.values()) clearTimeout(t);
     this.intervals.clear();
+    for (const run of this.precheckedRuns.values()) run.precheck?.abort();
     this.store = undefined;
     this.pi = undefined;
     this.ctx = undefined;
@@ -94,11 +107,13 @@ export class SubagentScheduler {
    */
   buildJob(input: NewJobInput): ScheduledSubagent {
     const detected = SubagentScheduler.detectSchedule(input.schedule);
+    if (input.schedule_precheck !== undefined) this.validatePrecheck(input.schedule_precheck, detected.type);
     return {
       id: nanoid(10),
       name: input.name,
       description: input.description,
       schedule: detected.normalized,
+      schedule_precheck: input.schedule_precheck,
       scheduleType: detected.type,
       intervalMs: detected.intervalMs,
       subagent_type: input.subagent_type,
@@ -200,6 +215,7 @@ export class SubagentScheduler {
   }
 
   private unscheduleJob(id: string): void {
+    this.precheckedRuns.get(id)?.precheck?.abort();
     const cron = this.jobs.get(id);
     if (cron) {
       cron.stop();
@@ -225,8 +241,94 @@ export class SubagentScheduler {
     const manager = this.manager;
     if (!store || !pi || !ctx || !manager) return;
     const job = store.get(id);
-    if (!job?.enabled) return;
+    if (!job?.enabled || this.precheckedRuns.has(id)) return;
+    if (job.schedule_precheck !== undefined) {
+      const precheck = new AbortController();
+      const run: { precheck?: AbortController } = { precheck };
+      this.precheckedRuns.set(id, run);
+      // Cancel pending probes when a job changes, but keep a dispatched agent
+      // single-flight until it settles, even if the job has been re-armed.
+      void this.checkJob(job, job.schedule_precheck, precheck, store, pi, ctx)
+        .then(shouldRun => {
+          if (!shouldRun || precheck.signal.aborted) return;
+          run.precheck = undefined;
+          return this.spawnJob(job, store, pi, ctx, manager);
+        })
+        .catch(err => this.emit({ type: "error", jobId: id, error: err instanceof Error ? err.message : String(err) }))
+        .finally(() => this.precheckedRuns.delete(id));
+      return;
+    }
+    void this.spawnJob(job, store, pi, ctx, manager);
+  }
 
+  private validatePrecheck(name: unknown, type: ScheduledSubagent["scheduleType"]): void {
+    if (typeof name !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(name)) {
+      throw new Error("schedule_precheck must be a probe name (1–64 letters, digits, dots, underscores, or hyphens).");
+    }
+    if (type !== "interval" && type !== "cron") throw new Error("schedule_precheck requires a recurring schedule.");
+  }
+
+  private async checkJob(
+    job: ScheduledSubagent,
+    name: string,
+    precheck: AbortController,
+    store: ScheduleStore,
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+  ): Promise<boolean> {
+    const deadline = new AbortController();
+    const signal = AbortSignal.any([precheck.signal, deadline.signal]);
+    const timer = setTimeout(() => deadline.abort(new Error("Precheck timed out.")), PRECHECK_TIMEOUT_MS);
+    try {
+      this.validatePrecheck(name, job.scheduleType);
+      const shouldRun = await new Promise<boolean>((resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        const checks: Array<() => boolean | Promise<boolean>> = [];
+        const request: SchedulePrecheckRequest = {
+          name,
+          cwd: ctx.cwd,
+          signal,
+          respondWith: check => {
+            // Handle an accidentally started (and possibly rejecting) probe.
+            if (typeof check !== "function") void Promise.resolve(check).catch(() => {});
+            checks.push(check);
+          },
+        };
+        pi.events.emit("subagents:schedule_precheck", request);
+        if (checks.length !== 1) throw new Error(checks.length === 0 ? "No precheck handler." : "Multiple precheck handlers.");
+        signal.throwIfAborted();
+        const check = checks[0];
+        if (typeof check !== "function") throw new Error("Precheck handler must supply a function.");
+        void Promise.resolve(check()).then(value => {
+          if (typeof value === "boolean") resolve(value);
+          else reject(new Error("Precheck must return a boolean."));
+        }, reject);
+      });
+      if (precheck.signal.aborted) return false;
+      signal.throwIfAborted();
+      if (shouldRun) return true;
+    } catch (err) {
+      if (precheck.signal.aborted) return false;
+      const error = err instanceof Error ? err.message : String(err);
+      store.update(job.id, { lastRun: new Date().toISOString(), lastStatus: "error" });
+      this.emit({ type: "error", jobId: job.id, error: `Precheck ${JSON.stringify(name)}: ${error}` });
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+    store.update(job.id, { lastRun: new Date().toISOString(), lastStatus: "skipped" });
+    this.emit({ type: "skipped", jobId: job.id });
+    return false;
+  }
+
+  private spawnJob(
+    job: ScheduledSubagent,
+    store: ScheduleStore,
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    manager: AgentManager,
+  ): Promise<void> | undefined {
+    const { id } = job;
     store.update(id, { lastStatus: "running" });
 
     // Resolve model at fire time — registry contents may have changed since the
@@ -297,7 +399,7 @@ export class SubagentScheduler {
     // Terminal states: completed/steered = success; error/aborted/stopped = error.
     // awaitStartup first: with isolation: "worktree" the run promise only exists
     // once the repo copy is made, and a failed copy rejects here.
-    manager.awaitStartup(agentId)
+    return manager.awaitStartup(agentId)
       .then(() => manager.getRecord(agentId)?.promise)
       .then(() => {
         const r = manager.getRecord(agentId);

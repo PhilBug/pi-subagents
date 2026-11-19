@@ -13,9 +13,10 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createEventBus } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
-import { SubagentScheduler } from "../src/schedule.js";
+import { type SchedulePrecheckRequest, SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
 
 function makeMockManager() {
@@ -268,6 +269,138 @@ describe("SubagentScheduler — fire path", () => {
     expect(manager.spawn).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(20_000);
     expect(manager.spawn).toHaveBeenCalledTimes(3);
+  });
+
+  function addGuardedJob() {
+    return scheduler.addJob({
+      name: "guarded", description: "tick", schedule: "1s", schedule_precheck: "cmux-changed",
+      subagent_type: "general-purpose", prompt: "tick",
+    });
+  }
+
+  function registerProbe(handler: (request: SchedulePrecheckRequest) => void) {
+    pi.events.emit.mockImplementation((event: string, request: SchedulePrecheckRequest) => {
+      if (event === "subagents:schedule_precheck") handler(request);
+    });
+  }
+
+  it("skips false without a spawn or run count and dispatches the next true", async () => {
+    const probe = vi.fn().mockReturnValueOnce(false).mockResolvedValueOnce(true);
+    pi.events = createEventBus();
+    pi.events.on("subagents:schedule_precheck", raw => {
+      const request = raw as SchedulePrecheckRequest;
+      if (request.name === "cmux-changed" && request.cwd === "/tmp") request.respondWith(probe);
+    });
+    const job = addGuardedJob();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(store.get(job.id)).toMatchObject({ lastStatus: "skipped", runCount: 0, enabled: true });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(manager.spawn).toHaveBeenCalledOnce();
+    expect(store.get(job.id)).toMatchObject({ lastStatus: "success", runCount: 1 });
+  });
+
+  it("fails closed without a handler, or with two matching handlers", async () => {
+    const job = addGuardedJob();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", error: expect.stringContaining("No precheck handler"),
+    }));
+    const probe = vi.fn(() => true);
+    registerProbe(request => {
+      request.respondWith(probe);
+      request.respondWith(probe);
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(probe).not.toHaveBeenCalled();
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", error: expect.stringContaining("Multiple precheck handlers"),
+    }));
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(store.get(job.id)).toMatchObject({ lastStatus: "error", runCount: 0 });
+  });
+
+  it("does not overlap checks and ignores a late pass after the deadline", async () => {
+    let finish!: (value: boolean) => void;
+    let signal: AbortSignal | undefined;
+    const probe = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve; }));
+    registerProbe(request => {
+      signal = request.signal;
+      request.respondWith(probe);
+    });
+    const job = addGuardedJob();
+    await vi.advanceTimersByTimeAsync(10_999);
+    expect(probe).toHaveBeenCalledOnce();
+    // Stub future checks so the assertion does not depend on timer ordering at the deadline.
+    registerProbe(request => request.respondWith(() => false));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signal?.aborted).toBe(true);
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", jobId: job.id, error: expect.stringContaining("timed out"),
+    }));
+    finish(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(manager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("rejects late results after a schedule is canceled or the session stops", async () => {
+    for (const stop of [false, true]) {
+      let finish!: (value: boolean) => void;
+      let signal: AbortSignal | undefined;
+      registerProbe(request => {
+        signal = request.signal;
+        request.respondWith(() => new Promise<boolean>(resolve => { finish = resolve; }));
+      });
+      const job = addGuardedJob();
+      await vi.advanceTimersByTimeAsync(1_000);
+      if (stop) scheduler.stop();
+      else scheduler.removeJob(job.id);
+      expect(signal?.aborted).toBe(true);
+      finish(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.spawn).not.toHaveBeenCalled();
+    }
+  });
+
+  it("holds the schedule through an edit until the dispatched agent settles", async () => {
+    let complete!: () => void;
+    const promise = new Promise<void>(resolve => { complete = resolve; });
+    manager.getRecord.mockReturnValue({ promise });
+    const probe = vi.fn(() => true);
+    registerProbe(request => request.respondWith(probe));
+    const job = addGuardedJob();
+    await vi.advanceTimersByTimeAsync(1_000);
+    scheduler.updateJob(job.id, { description: "edited" });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(probe).toHaveBeenCalledOnce();
+    expect(manager.spawn).toHaveBeenCalledOnce();
+    complete();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.get(job.id)).toMatchObject({ lastStatus: "success", runCount: 1, description: "edited" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(manager.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not emit a probe request for a malformed persisted name", async () => {
+    const job = addGuardedJob();
+    store.update(job.id, { schedule_precheck: "bad name" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:schedule_precheck", expect.anything());
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(store.get(job.id)?.lastStatus).toBe("error");
+  });
+
+  it("fails closed on a rejected probe or a non-boolean result", async () => {
+    const job = addGuardedJob();
+    const probe = vi.fn().mockRejectedValueOnce(new Error("probe read failed")).mockResolvedValueOnce("true");
+    registerProbe(request => request.respondWith(probe));
+    for (const message of ["probe read failed", "Precheck must return a boolean."]) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+        type: "error", jobId: job.id, error: expect.stringContaining(message),
+      }));
+    }
+    expect(manager.spawn).not.toHaveBeenCalled();
   });
 
   it("refuses at fire time when the job's agent type no longer resolves", () => {

@@ -376,6 +376,7 @@ export interface ScheduledSubagent {
   /** Raw user input — cron expr | "+10m" | ISO | "5m". */
   schedule: string;
   scheduleType: "cron" | "once" | "interval";
+  schedule_precheck?: string;
   /** Computed at create time for interval/once. */
   intervalMs?: number;
 
@@ -393,7 +394,7 @@ export interface ScheduledSubagent {
   /** ISO timestamp. */
   createdAt: string;
   lastRun?: string;
-  lastStatus?: "success" | "error" | "running";
+  lastStatus?: "success" | "error" | "running" | "skipped";
   /** Refreshed on every fire and on store load. */
   nextRun?: string;
   runCount: number;
