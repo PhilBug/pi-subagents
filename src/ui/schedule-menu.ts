@@ -35,6 +35,7 @@ function statusIcon(j: ScheduledSubagent): string {
   if (!j.enabled) return "✗";
   if (j.lastStatus === "error") return "!";
   if (j.lastStatus === "running") return "⋯";
+  if (j.lastStatus === "skipped") return "–";
   return "✓";
 }
 
@@ -58,6 +59,7 @@ function formatDetails(j: ScheduledSubagent, scheduler: SubagentScheduler): stri
   return [
     `name:      ${j.name}`,
     `schedule:  ${j.schedule} (${j.scheduleType})`,
+    ...(j.schedule_precheck ? [`precheck:  ${j.schedule_precheck}`] : []),
     `agent:     ${j.subagent_type}`,
     `prompt:    ${j.prompt.slice(0, 200)}${j.prompt.length > 200 ? "…" : ""}`,
     `created:   ${j.createdAt}`,

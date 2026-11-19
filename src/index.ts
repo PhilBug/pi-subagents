@@ -1635,6 +1635,9 @@ export default function (pi: ExtensionAPI) {
           'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
       }),
     ),
+    schedule_precheck: Type.Optional(Type.String({
+      description: "Optional name of a trusted local extension probe. Recurring schedules only; the agent runs only if the probe returns true.",
+    })),
   };
   const scheduleParam: Partial<typeof scheduleParamShape> =
     isSchedulingEnabled() ? scheduleParamShape : {};
@@ -1965,6 +1968,12 @@ Terse command-style prompts produce shallow, generic work.
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
+      const precheck = callParams.schedule_precheck;
+      if (precheck !== undefined) {
+        if (typeof precheck !== "string") return textResult("schedule_precheck must be a probe name.");
+        if (!callParams.schedule) return textResult("schedule_precheck requires a recurring schedule.");
+      }
+
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
 
@@ -2000,6 +2009,7 @@ Terse command-style prompts produce shallow, generic work.
         max_turns: callParams.max_turns,
         isolation: undefined,
         schedule: undefined,
+        schedule_precheck: undefined,
       };
 
       const rawType = params.subagent_type as SubagentType;
@@ -2187,6 +2197,7 @@ Terse command-style prompts produce shallow, generic work.
             name: params.description as string,
             description: params.description as string,
             schedule: params.schedule as string,
+            schedule_precheck: precheck,
             // The caller's own name, not the substitute — the scheduler re-resolves
             // at fire time, and the original is what a user edits.
             subagent_type: requestedType,

@@ -145,6 +145,19 @@ When a schedule fires, the spawn runs in background and its completion notificat
 
 Schedules are **session-scoped**: they reset on `/new` and restore on `/resume`. List and cancel via `/agents → Scheduled jobs` (creation is the `Agent` tool's job — there is no parallel manual-create wizard). Storage at `<cwd>/.pi/subagent-schedules/<sessionId>.json` with PID-based file locking for cross-instance safety.
 
+**Run only when needed.** Add `schedule_precheck: "cmux-changed"` to a recurring `Agent` schedule to run a named probe before each dispatch. The probe comes from a trusted Pi extension, not from a command in the schedule. `true` starts the agent; `false` records `skipped` in Scheduled jobs without starting an agent or increasing its run count. A missing, duplicate, failing, or timed-out probe records an error and does not start an agent. A guarded job ignores ticks while its current check or agent is still running. Other jobs are unchanged.
+
+An extension registers a probe by listening on the Pi event bus:
+
+```ts
+pi.events.on("subagents:schedule_precheck", request => {
+  const { name, cwd, signal, respondWith } = request as SchedulePrecheckRequest;
+  if (name === "cmux-changed") respondWith(() => hasChanges(cwd, signal));
+});
+```
+
+`SchedulePrecheckRequest` is defined in `src/schedule.ts`. Call `respondWith` synchronously in the listener and supply a function returning a boolean or a promise of a boolean. Keep the check read-only and honor its abort signal during I/O. The scheduler stops waiting after 10 seconds or if the schedule is canceled. Report a failed read by throwing, not by returning `false`. The scheduler does not include a cmux probe or manage the probe's baseline.
+
 **Disable the feature entirely**: `/agents → Settings → Scheduling → disabled` removes `schedule` from the `Agent` tool spec (no LLM-context cost), hides the menu entry, and stops any active scheduler. The schema-level removal takes effect on the next pi session; the runtime kill is immediate. Re-enable from the same menu.
 
 Restrictions:
@@ -852,7 +865,8 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:usage` | Every assistant message any agent spends on — top-level, nested and workflow children alike, live while it runs | Always: `id`, `type`, `description`, `depth`, `usage` (that one message's spend as a pi `Usage`; never emitted for a message that spent nothing). Omitted when unknown, never `undefined`: `model` (`provider/id`) and `thinking` (the effective level) until the session has reported them; `requestedThinking`, only when the agent did not get the level it asked for; `parentAgentId`, nested agents only; `workflowId`, a workflow's agents only |
 | `subagents:compacted` | Agent's session successfully compacted | `id`, `type`, `description`, `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
 | `subagents:disposed` | End of `session_shutdown`, after every agent is stopped and every child session has shut down — no `subagents:usage` can follow it. A ledger flushing in its own `session_shutdown` may run before the agents are aborted; flush again here, **synchronously** (`writeFileSync`, not `fs.promises`): `emit` does not await listeners and pi calls `process.exit` once the shutdown handlers return, so nothing after a listener's first `await` is guaranteed to run | `{}` |
-| `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "error", … }` (job/agentId/error fields per type) |
+| `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "skipped" \| "error", … }` (job/agentId/error fields per type) |
+| `subagents:schedule_precheck` | Ask a named local probe before dispatch | `SchedulePrecheckRequest` (`name`, `cwd`, `signal`, `respondWith`) |
 | `subagents:scheduler_ready` | Scheduler bound to session, enabled jobs armed | `sessionId`, `jobCount` |
 | `subagents:ready` | RPC handlers registered and armed — fired on session start; not emitted in a session that excludes pi-subagents | `{}` (empty object) |
 | `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
